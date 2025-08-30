@@ -132,6 +132,7 @@ app.layout = dbc.Container([
         dcc.Tab(label="🔄 Pair Trades", value="pairs"),
         dcc.Tab(label="📈 Analysis", value="analysis"), 
         dcc.Tab(label="🏢 Sectors", value="sectors"),
+        dcc.Tab(label="💼 Portfolio", value="portfolio"),
         dcc.Tab(label="📋 Data Export", value="export")
     ]),
     
@@ -739,6 +740,118 @@ def update_tab_content(tab, sector, industry, records, min_pnn, etf_filter):
             )
         ])
     
+    elif tab == "portfolio":
+        # Portfolio construction with constraints
+        
+        # Apply $10M volume filter and exclude ETFs
+        portfolio_universe = filtered_df[
+            (filtered_df['VOLUME'] >= 10_000_000) & 
+            (filtered_df['INDUSTRY'] != 'ETF')
+        ].copy()
+        
+        # Sort by P_NN for long/short selection
+        portfolio_universe_sorted = portfolio_universe.sort_values('P_NN', ascending=False)
+        
+        # Select candidates for longs (top P_NN values) and shorts (bottom P_NN values)
+        # Take top 50 for longs and bottom 50 for shorts to ensure we have enough candidates
+        long_candidates = portfolio_universe_sorted.head(50)
+        short_candidates = portfolio_universe_sorted.tail(50)
+        
+        # Build balanced portfolio with constraints
+        def build_balanced_portfolio(candidates, target_count, is_long=True):
+            selected = []
+            sector_counts = {}
+            industry_counts = {}
+            
+            for _, stock in candidates.iterrows():
+                sector = stock['SECTOR']
+                industry = stock['INDUSTRY']
+                
+                # Check constraints
+                if sector_counts.get(sector, 0) >= 4:  # Max 4 per sector
+                    continue
+                if industry_counts.get(industry, 0) >= 2:  # Max 2 per industry
+                    continue
+                
+                # Add to portfolio
+                selected.append(stock)
+                sector_counts[sector] = sector_counts.get(sector, 0) + 1
+                industry_counts[industry] = industry_counts.get(industry, 0) + 1
+                
+                if len(selected) >= target_count:
+                    break
+            
+            return pd.DataFrame(selected)
+        
+        # Build 20 longs and 40 shorts
+        long_portfolio = build_balanced_portfolio(long_candidates, 20, True)
+        short_portfolio = build_balanced_portfolio(short_candidates, 40, False)
+        
+        # Calculate position sizes (equal dollar weight within buckets)
+        portfolio_value = 10_000_000  # $10M portfolio
+        long_allocation = 0.5  # 50% long
+        short_allocation = 0.5  # 50% short
+        
+        if len(long_portfolio) > 0:
+            long_position_size = (portfolio_value * long_allocation) / len(long_portfolio)
+            long_portfolio['POSITION_SIZE'] = long_position_size
+            long_portfolio['POSITION_TYPE'] = 'LONG'
+        
+        if len(short_portfolio) > 0:
+            short_position_size = (portfolio_value * short_allocation) / len(short_portfolio)
+            short_portfolio['POSITION_SIZE'] = short_position_size
+            short_portfolio['POSITION_TYPE'] = 'SHORT'
+        
+        return html.Div([
+            html.H3("💼 Portfolio Builder", className="mt-3 mb-3"),
+            
+            # Portfolio Summary
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("Portfolio Summary"),
+                        dbc.CardBody([
+                            dbc.Row([
+                                dbc.Col([
+                                    html.H5(f"{len(portfolio_universe):,}", className="text-primary"),
+                                    html.P("Securities in Universe", className="text-muted mb-0"),
+                                    html.Small(f"(Volume ≥ $10M, No ETFs)", className="text-muted")
+                                ], width=3),
+                                dbc.Col([
+                                    html.H5(f"{len(long_portfolio)}", className="text-success"),
+                                    html.P("Long Positions", className="text-muted mb-0"),
+                                    html.Small(f"Top P_NN Signals", className="text-muted")
+                                ], width=3),
+                                dbc.Col([
+                                    html.H5(f"{len(short_portfolio)}", className="text-danger"),
+                                    html.P("Short Positions", className="text-muted mb-0"),
+                                    html.Small(f"Bottom P_NN Signals", className="text-muted")
+                                ], width=3),
+                                dbc.Col([
+                                    html.H5(f"${portfolio_value/1_000_000:.1f}M", className="text-info"),
+                                    html.P("Total Portfolio", className="text-muted mb-0"),
+                                    html.Small(f"50% Long / 50% Short", className="text-muted")
+                                ], width=3)
+                            ])
+                        ])
+                    ])
+                ])
+            ], className="mb-4"),
+            
+            # Portfolio Tabs
+            dcc.Tabs(id="portfolio-tabs", value="long", children=[
+                dcc.Tab(label=f"📈 Long Positions ({len(long_portfolio)})", value="long"),
+                dcc.Tab(label=f"📉 Short Positions ({len(short_portfolio)})", value="short"),
+                dcc.Tab(label="⚖️ Balance Analysis", value="balance")
+            ]),
+            
+            html.Div(id="portfolio-tab-content"),
+            
+            # Add JavaScript for portfolio tab switching
+            dcc.Store(id="long-portfolio", data=long_portfolio.to_dict('records') if len(long_portfolio) > 0 else []),
+            dcc.Store(id="short-portfolio", data=short_portfolio.to_dict('records') if len(short_portfolio) > 0 else [])
+        ])
+    
     elif tab == "export":
         return html.Div([
             html.H3("📋 Data Export", className="mt-3 mb-3"),
@@ -757,6 +870,135 @@ def update_tab_content(tab, sector, industry, records, min_pnn, etf_filter):
                         html.Li(f"Total volume: ${filtered_df['VOLUME'].sum():,.0f}")
                     ])
                 ])
+            ])
+        ])
+
+# Callback for portfolio sub-tabs
+@app.callback(
+    Output("portfolio-tab-content", "children"),
+    [Input("portfolio-tabs", "value"),
+     Input("long-portfolio", "data"),
+     Input("short-portfolio", "data")]
+)
+def update_portfolio_tabs(portfolio_tab, long_data, short_data):
+    if portfolio_tab == "long":
+        if not long_data:
+            return html.Div([
+                dbc.Alert("No long positions found with current criteria (Top P_NN, Volume ≥ $10M)", color="warning")
+            ])
+        
+        long_df = pd.DataFrame(long_data)
+        return html.Div([
+            html.H4("📈 Long Positions", className="mt-3 mb-3"),
+            dash_table.DataTable(
+                data=long_df.to_dict('records'),
+                columns=[
+                    {'name': 'Ticker', 'id': 'TICKER'},
+                    {'name': 'Name', 'id': 'NAME'},
+                    {'name': 'Sector', 'id': 'SECTOR'},
+                    {'name': 'Industry', 'id': 'INDUSTRY'},
+                    {'name': 'P_NN Signal', 'id': 'P_NN', 'type': 'numeric', 'format': {'specifier': '.4f'}},
+                    {'name': 'Close Price', 'id': 'CLOSE', 'type': 'numeric', 'format': {'specifier': '$.2f'}},
+                    {'name': 'Volume', 'id': 'VOLUME', 'type': 'numeric', 'format': {'specifier': ',.0f'}},
+                    {'name': 'Position Size', 'id': 'POSITION_SIZE', 'type': 'numeric', 'format': {'specifier': '$,.0f'}}
+                ],
+                sort_action="native",
+                filter_action="native",
+                page_size=20,
+                style_cell={'textAlign': 'left'},
+                style_data_conditional=[
+                    {
+                        'if': {'column_id': 'P_NN'},
+                        'backgroundColor': '#d4edda',
+                        'color': 'black'
+                    }
+                ]
+            )
+        ])
+    
+    elif portfolio_tab == "short":
+        if not short_data:
+            return html.Div([
+                dbc.Alert("No short positions found with current criteria (Bottom P_NN, Volume ≥ $10M)", color="warning")
+            ])
+        
+        short_df = pd.DataFrame(short_data)
+        return html.Div([
+            html.H4("📉 Short Positions", className="mt-3 mb-3"),
+            dash_table.DataTable(
+                data=short_df.to_dict('records'),
+                columns=[
+                    {'name': 'Ticker', 'id': 'TICKER'},
+                    {'name': 'Name', 'id': 'NAME'},
+                    {'name': 'Sector', 'id': 'SECTOR'},
+                    {'name': 'Industry', 'id': 'INDUSTRY'},
+                    {'name': 'P_NN Signal', 'id': 'P_NN', 'type': 'numeric', 'format': {'specifier': '.4f'}},
+                    {'name': 'Close Price', 'id': 'CLOSE', 'type': 'numeric', 'format': {'specifier': '$.2f'}},
+                    {'name': 'Volume', 'id': 'VOLUME', 'type': 'numeric', 'format': {'specifier': ',.0f'}},
+                    {'name': 'Position Size', 'id': 'POSITION_SIZE', 'type': 'numeric', 'format': {'specifier': '$,.0f'}}
+                ],
+                sort_action="native",
+                filter_action="native",
+                page_size=20,
+                style_cell={'textAlign': 'left'},
+                style_data_conditional=[
+                    {
+                        'if': {'column_id': 'P_NN'},
+                        'backgroundColor': '#f8d7da',
+                        'color': 'black'
+                    }
+                ]
+            )
+        ])
+    
+    elif portfolio_tab == "balance":
+        # Create balance analysis
+        long_df = pd.DataFrame(long_data) if long_data else pd.DataFrame()
+        short_df = pd.DataFrame(short_data) if short_data else pd.DataFrame()
+        
+        # Sector distribution
+        long_sectors = long_df['SECTOR'].value_counts() if len(long_df) > 0 else pd.Series()
+        short_sectors = short_df['SECTOR'].value_counts() if len(short_df) > 0 else pd.Series()
+        
+        # Industry distribution  
+        long_industries = long_df['INDUSTRY'].value_counts() if len(long_df) > 0 else pd.Series()
+        short_industries = short_df['INDUSTRY'].value_counts() if len(short_df) > 0 else pd.Series()
+        
+        return html.Div([
+            html.H4("⚖️ Portfolio Balance Analysis", className="mt-3 mb-3"),
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("Sector Distribution"),
+                        dbc.CardBody([
+                            html.H6("Long Positions:"),
+                            html.Ul([html.Li(f"{sector}: {count}") for sector, count in long_sectors.items()]) if len(long_sectors) > 0 else html.P("No long positions"),
+                            html.H6("Short Positions:", className="mt-3"),
+                            html.Ul([html.Li(f"{sector}: {count}") for sector, count in short_sectors.items()]) if len(short_sectors) > 0 else html.P("No short positions")
+                        ])
+                    ])
+                ], width=6),
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("Risk Metrics"),
+                        dbc.CardBody([
+                            html.P(f"Portfolio Constraints:"),
+                            html.Ul([
+                                html.Li("Maximum 4 positions per sector"),
+                                html.Li("Maximum 2 positions per industry"),
+                                html.Li("Minimum $10M daily volume"),
+                                html.Li("Equal dollar weighting within buckets")
+                            ]),
+                            html.Hr(),
+                            html.P("Rebalancing Triggers:"),
+                            html.Ul([
+                                html.Li("Long signals: P_NN drops below 0.03"),
+                                html.Li("Short signals: P_NN rises above -0.03"),
+                                html.Li("Volume falls below $10M threshold")
+                            ])
+                        ])
+                    ])
+                ], width=6)
             ])
         ])
 
