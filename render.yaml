@@ -3,4 +3,4 @@ services:
     name: squeezemetrics-dashboard
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python app_no_pandas.py
+    startCommand: python app.py
