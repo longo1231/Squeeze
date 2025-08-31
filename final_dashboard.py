@@ -1,5 +1,5 @@
 import dash
-from dash import dcc, html, dash_table, Input, Output, callback
+from dash import dcc, html, dash_table, Input, Output, State, callback
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
@@ -838,6 +838,22 @@ def update_tab_content(tab, sector, industry, records, min_pnn, etf_filter):
                 ])
             ], className="mb-4"),
             
+            # Quick Export Section
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("📊 Quick Export"),
+                        dbc.CardBody([
+                            dbc.ButtonGroup([
+                                dbc.Button("📈 Export Long Positions", id="btn-download-long", color="success", size="sm"),
+                                dbc.Button("📉 Export Short Positions", id="btn-download-short", color="danger", size="sm"),
+                                dbc.Button("📋 Export Combined Portfolio", id="btn-download-combined", color="primary", size="sm")
+                            ], className="d-grid gap-2 d-md-block")
+                        ])
+                    ])
+                ], width=12)
+            ], className="mb-4"),
+            
             # Portfolio Tabs
             dcc.Tabs(id="portfolio-tabs", value="long", children=[
                 dcc.Tab(label=f"📈 Long Positions ({len(long_portfolio)})", value="long"),
@@ -846,6 +862,11 @@ def update_tab_content(tab, sector, industry, records, min_pnn, etf_filter):
             ]),
             
             html.Div(id="portfolio-tab-content"),
+            
+            # Download components
+            dcc.Download(id="download-long-excel"),
+            dcc.Download(id="download-short-excel"),
+            dcc.Download(id="download-combined-excel"),
             
             # Add JavaScript for portfolio tab switching
             dcc.Store(id="long-portfolio", data=long_portfolio.to_dict('records') if len(long_portfolio) > 0 else []),
@@ -873,6 +894,51 @@ def update_tab_content(tab, sector, industry, records, min_pnn, etf_filter):
             ])
         ])
 
+# Callback for downloading portfolio Excel files
+@app.callback(
+    Output("download-long-excel", "data"),
+    Input("btn-download-long", "n_clicks"),
+    State("long-portfolio", "data"),
+    prevent_initial_call=True
+)
+def download_long_excel(n_clicks, long_data):
+    if n_clicks and long_data:
+        df = pd.DataFrame(long_data)
+        df = df[['TICKER', 'NAME', 'SECTOR', 'INDUSTRY', 'P_NN', 'CLOSE', 'VOLUME', 'POSITION_SIZE', 'POSITION_TYPE']]
+        return dcc.send_data_frame(df.to_excel, f"long_positions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx", index=False)
+
+@app.callback(
+    Output("download-short-excel", "data"),
+    Input("btn-download-short", "n_clicks"),
+    State("short-portfolio", "data"),
+    prevent_initial_call=True
+)
+def download_short_excel(n_clicks, short_data):
+    if n_clicks and short_data:
+        df = pd.DataFrame(short_data)
+        df = df[['TICKER', 'NAME', 'SECTOR', 'INDUSTRY', 'P_NN', 'CLOSE', 'VOLUME', 'POSITION_SIZE', 'POSITION_TYPE']]
+        return dcc.send_data_frame(df.to_excel, f"short_positions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx", index=False)
+
+@app.callback(
+    Output("download-combined-excel", "data"),
+    Input("btn-download-combined", "n_clicks"),
+    State("long-portfolio", "data"),
+    State("short-portfolio", "data"),
+    prevent_initial_call=True
+)
+def download_combined_excel(n_clicks, long_data, short_data):
+    if n_clicks:
+        long_df = pd.DataFrame(long_data) if long_data else pd.DataFrame()
+        short_df = pd.DataFrame(short_data) if short_data else pd.DataFrame()
+        
+        if len(long_df) > 0:
+            long_df = long_df[['TICKER', 'NAME', 'SECTOR', 'INDUSTRY', 'P_NN', 'CLOSE', 'VOLUME', 'POSITION_SIZE', 'POSITION_TYPE']]
+        if len(short_df) > 0:
+            short_df = short_df[['TICKER', 'NAME', 'SECTOR', 'INDUSTRY', 'P_NN', 'CLOSE', 'VOLUME', 'POSITION_SIZE', 'POSITION_TYPE']]
+        
+        combined_df = pd.concat([long_df, short_df], ignore_index=True)
+        return dcc.send_data_frame(combined_df.to_excel, f"portfolio_positions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx", index=False)
+
 # Callback for portfolio sub-tabs
 @app.callback(
     Output("portfolio-tab-content", "children"),
@@ -888,8 +954,22 @@ def update_portfolio_tabs(portfolio_tab, long_data, short_data):
             ])
         
         long_df = pd.DataFrame(long_data)
+        ticker_list = ', '.join(long_df['TICKER'].tolist())
+        
         return html.Div([
             html.H4("📈 Long Positions", className="mt-3 mb-3"),
+            
+            # Ticker list for easy copying
+            dbc.Alert([
+                html.Strong("💡 Copy Ticker List: "),
+                html.Code(ticker_list, id="long-ticker-list", 
+                        style={"backgroundColor": "#e8f5e8", "padding": "8px", 
+                              "borderRadius": "4px", "fontSize": "14px", 
+                              "cursor": "pointer", "userSelect": "all"}),
+                html.Small(" (Click to select all)", className="text-muted ms-2")
+            ], color="success", className="mb-3"),
+            
+            # Data table with no pagination
             dash_table.DataTable(
                 data=long_df.to_dict('records'),
                 columns=[
@@ -903,18 +983,18 @@ def update_portfolio_tabs(portfolio_tab, long_data, short_data):
                     {'name': 'Position Size', 'id': 'POSITION_SIZE', 'type': 'numeric', 'format': {'specifier': '$,.0f'}}
                 ],
                 sort_action="native",
-                filter_action="native",
-                page_size=20,
-                style_cell={'textAlign': 'left'},
+                style_cell={'textAlign': 'left', 'fontSize': '13px', 'padding': '8px'},
+                style_header={'backgroundColor': '#28a745', 'color': 'white', 'fontWeight': 'bold'},
                 style_data_conditional=[
                     {
                         'if': {'column_id': 'P_NN'},
                         'backgroundColor': '#d4edda',
                         'color': 'black'
                     }
-                ]
+                ],
+                page_size=len(long_df)  # Show all rows - no pagination
             )
-        ])
+        ], style={'marginBottom': '20px'})
     
     elif portfolio_tab == "short":
         if not short_data:
@@ -923,8 +1003,22 @@ def update_portfolio_tabs(portfolio_tab, long_data, short_data):
             ])
         
         short_df = pd.DataFrame(short_data)
+        ticker_list = ', '.join(short_df['TICKER'].tolist())
+        
         return html.Div([
             html.H4("📉 Short Positions", className="mt-3 mb-3"),
+            
+            # Ticker list for easy copying
+            dbc.Alert([
+                html.Strong("💡 Copy Ticker List: "),
+                html.Code(ticker_list, id="short-ticker-list",
+                        style={"backgroundColor": "#f8e8e8", "padding": "8px", 
+                              "borderRadius": "4px", "fontSize": "14px",
+                              "cursor": "pointer", "userSelect": "all"}),
+                html.Small(" (Click to select all)", className="text-muted ms-2")
+            ], color="danger", className="mb-3"),
+            
+            # Data table with no pagination
             dash_table.DataTable(
                 data=short_df.to_dict('records'),
                 columns=[
@@ -938,18 +1032,18 @@ def update_portfolio_tabs(portfolio_tab, long_data, short_data):
                     {'name': 'Position Size', 'id': 'POSITION_SIZE', 'type': 'numeric', 'format': {'specifier': '$,.0f'}}
                 ],
                 sort_action="native",
-                filter_action="native",
-                page_size=20,
-                style_cell={'textAlign': 'left'},
+                style_cell={'textAlign': 'left', 'fontSize': '13px', 'padding': '8px'},
+                style_header={'backgroundColor': '#dc3545', 'color': 'white', 'fontWeight': 'bold'},
                 style_data_conditional=[
                     {
                         'if': {'column_id': 'P_NN'},
                         'backgroundColor': '#f8d7da',
                         'color': 'black'
                     }
-                ]
+                ],
+                page_size=len(short_df)  # Show all rows - no pagination
             )
-        ])
+        ], style={'marginBottom': '20px'})
     
     elif portfolio_tab == "balance":
         # Create balance analysis
